@@ -124,6 +124,8 @@ class DirectoryRequest(BaseModel):
 class MoveRequest(BaseModel):
     source: str
     destination_folder: str
+    pages_to_keep: int = 0
+    backup_folder: str = ""
 
 class PreviewRequest(BaseModel):
     path: str
@@ -180,6 +182,45 @@ async def get_all_pages(request: PreviewRequest):
     
     return {"pages": pages}
 
+@app.post("/api/page-count")
+async def get_page_count(request: PreviewRequest):
+    path = request.path
+    if not Path(path).exists():
+        raise HTTPException(status_code=404, detail="PDF not found")
+    
+    try:
+        doc = fitz.open(path)
+        count = len(doc)
+        doc.close()
+        return {"count": count}
+    except:
+        raise HTTPException(status_code=500, detail="Failed to read PDF")
+
+class UndoRequest(BaseModel):
+    sorted_path: str
+    backup_path: str
+    original_folder: str
+
+@app.post("/api/undo-move")
+async def undo_move(request: UndoRequest):
+    sorted_path = Path(request.sorted_path)
+    backup_path = Path(request.backup_path) if request.backup_path else None
+    original_folder = Path(request.original_folder)
+    
+    try:
+        if sorted_path.exists():
+            sorted_path.unlink()
+        
+        if backup_path and backup_path.exists():
+            original_name = backup_path.name
+            original_dest = original_folder / original_name
+            shutil.move(str(backup_path), str(original_dest))
+            return {"success": True, "restored_path": str(original_dest)}
+        
+        return {"success": True, "restored_path": None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to undo: {str(e)}")
+
 @app.get("/api/preview-image/{pdf_path:path}")
 async def get_preview_image(pdf_path: str):
     if not pdf_path.startswith("/"):
@@ -226,6 +267,8 @@ async def validate_folder(request: DirectoryRequest):
 async def move_pdf(request: MoveRequest):
     source = Path(request.source)
     dest_folder = Path(request.destination_folder)
+    pages_to_keep = request.pages_to_keep
+    backup_folder = Path(request.backup_folder) if request.backup_folder else None
     
     if not source.exists():
         raise HTTPException(status_code=404, detail="Source file not found")
@@ -245,13 +288,44 @@ async def move_pdf(request: MoveRequest):
     old_path = str(source)
     if old_path in preview_cache:
         del preview_cache[old_path]
+    cache_key = old_path + "_all"
+    if cache_key in preview_cache:
+        del preview_cache[cache_key]
+    
+    backup_path = None
     
     try:
-        shutil.move(str(source), str(destination))
+        if pages_to_keep > 0 and backup_folder:
+            backup_folder.mkdir(parents=True, exist_ok=True)
+            backup_dest = backup_folder / source.name
+            if backup_dest.exists():
+                base = source.stem
+                suffix = source.suffix
+                counter = 1
+                while backup_dest.exists():
+                    backup_dest = backup_folder / f"{base}_{counter}{suffix}"
+                    counter += 1
+            
+            shutil.copy2(str(source), str(backup_dest))
+            backup_path = str(backup_dest)
+            
+            doc = fitz.open(str(source))
+            total_pages = len(doc)
+            pages_to_extract = min(pages_to_keep, total_pages)
+            
+            new_doc = fitz.open()
+            new_doc.insert_pdf(doc, from_page=0, to_page=pages_to_extract - 1)
+            new_doc.save(str(destination))
+            new_doc.close()
+            doc.close()
+            
+            source.unlink()
+        else:
+            shutil.move(str(source), str(destination))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to move file: {str(e)}")
     
-    return {"success": True, "new_path": str(destination)}
+    return {"success": True, "new_path": str(destination), "backup_path": backup_path}
 
 @app.get("/api/pdf/{pdf_path:path}")
 async def get_pdf(pdf_path: str):

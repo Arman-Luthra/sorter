@@ -305,6 +305,56 @@
             cursor: not-allowed;
         }
 
+        .page-selector {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-right: 1rem;
+            padding-right: 1rem;
+            border-right: 1px solid var(--border);
+        }
+
+        .page-selector label {
+            font-size: 0.75rem;
+            color: var(--text-sub);
+        }
+
+        .page-option {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+
+        .page-option input[type="radio"] {
+            margin: 0;
+            cursor: pointer;
+        }
+
+        .page-option input[type="number"] {
+            width: 50px;
+            padding: 0.25rem 0.4rem;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            font-family: inherit;
+            font-size: 0.8rem;
+        }
+
+        .page-indicator {
+            position: sticky;
+            top: 12px;
+            left: 12px;
+            align-self: flex-start;
+            background: rgba(27, 29, 30, 0.85);
+            color: white;
+            padding: 0.5rem 0.85rem;
+            border-radius: 2px;
+            font-size: 0.95rem;
+            z-index: 20;
+            margin-bottom: -40px;
+        }
+
         .preview-content {
             flex: 1;
             background: var(--bg);
@@ -314,6 +364,7 @@
             align-items: center;
             gap: 4px;
             padding: 4px;
+            position: relative;
         }
 
         .preview-content img {
@@ -398,6 +449,16 @@
                 <div class="preview-header">
                     <h2 id="currentFileName">Select a PDF</h2>
                     <div class="action-buttons">
+                        <div class="page-selector">
+                            <label>Pages:</label>
+                            <label class="page-option">
+                                <input type="radio" name="pages" value="all" checked> All
+                            </label>
+                            <label class="page-option">
+                                <input type="radio" name="pages" value="custom">
+                                <input type="number" id="customPages" min="1" value="1" onclick="document.querySelector('input[value=custom]').checked=true">
+                            </label>
+                        </div>
                         <button class="undo-btn" id="undoBtn" onclick="undoLastMove()" disabled>Undo (Z)</button>
                         <button class="sort-btn folder1" id="folder1Btn" onclick="sortToFolder(1)">← Folder 1</button>
                         <button class="sort-btn folder2" id="folder2Btn" onclick="sortToFolder(2)">Folder 2 →</button>
@@ -414,6 +475,7 @@
         let pdfs = [];
         let currentIndex = -1;
         let sortedCount = 0;
+        let sourceFolder = '';
         let destFolder1 = '';
         let destFolder2 = '';
         let destFolder1Name = '';
@@ -421,6 +483,7 @@
         let moveHistory = [];
         let previewCache = new Map();
         let allPagesCache = new Map();
+        let currentPageCount = 0;
 
         function getFolderName(path) {
             return path.split('/').filter(Boolean).pop() || path;
@@ -461,7 +524,7 @@
         }
 
         async function loadPDFs() {
-            const sourceFolder = document.getElementById('sourceFolder').value.trim();
+            sourceFolder = document.getElementById('sourceFolder').value.trim();
             destFolder1 = document.getElementById('destFolder1').value.trim();
             destFolder2 = document.getElementById('destFolder2').value.trim();
 
@@ -579,20 +642,67 @@
                 const previewSrc = previewCache.has(pdf.path) 
                     ? previewCache.get(pdf.path) 
                     : '/api/preview-image' + pdf.path;
-                container.innerHTML = `<img src="${previewSrc}">`;
+                container.innerHTML = `<div class="page-indicator" id="pageIndicator">1 of ...</div><img src="${previewSrc}">`;
                 
                 loadAllPages(pdf.path, index);
             }
             
             renderPDFList();
             preloadNextPDFs();
+            
+            fetchPageCount(pdf.path);
+        }
+
+        async function fetchPageCount(path) {
+            try {
+                const res = await fetch('/api/page-count', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: path })
+                });
+                const data = await res.json();
+                currentPageCount = data.count;
+                document.getElementById('pageCount').textContent = `(${currentPageCount} total)`;
+            } catch (err) {
+                currentPageCount = 0;
+                document.getElementById('pageCount').textContent = '';
+            }
+        }
+
+        function getSelectedPages() {
+            const selected = document.querySelector('input[name="pages"]:checked').value;
+            if (selected === 'all') return 0;
+            return parseInt(document.getElementById('customPages').value) || 1;
         }
 
         function renderAllPages(container, pages) {
-            container.innerHTML = pages.map((b64, i) => 
-                `<img src="data:image/jpeg;base64,${b64}">`
-            ).join('');
+            container.innerHTML = `<div class="page-indicator" id="pageIndicator">1 of ${pages.length}</div>` +
+                pages.map((b64, i) => 
+                    `<img src="data:image/jpeg;base64,${b64}" data-page="${i + 1}">`
+                ).join('');
             container.scrollTop = 0;
+            
+            container.onscroll = () => updatePageIndicator(container, pages.length);
+            updatePageIndicator(container, pages.length);
+        }
+
+        function updatePageIndicator(container, totalPages) {
+            const images = container.querySelectorAll('img');
+            const containerRect = container.getBoundingClientRect();
+            const containerCenter = containerRect.top + containerRect.height / 3;
+            
+            let currentPage = 1;
+            for (let img of images) {
+                const rect = img.getBoundingClientRect();
+                if (rect.top <= containerCenter && rect.bottom > containerRect.top) {
+                    currentPage = parseInt(img.dataset.page);
+                }
+            }
+            
+            const indicator = document.getElementById('pageIndicator');
+            if (indicator) {
+                indicator.textContent = `${currentPage} of ${totalPages}`;
+            }
         }
 
         async function loadAllPages(path, forIndex) {
@@ -630,6 +740,8 @@
             
             const pdf = pdfs[currentIndex];
             const destFolder = folderNum === 1 ? destFolder1 : destFolder2;
+            const pagesToKeep = getSelectedPages();
+            const backupFolder = pagesToKeep > 0 ? sourceFolder + 'sorted/' : '';
 
             try {
                 const res = await fetch('/api/move-pdf', {
@@ -637,7 +749,9 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         source: pdf.path,
-                        destination_folder: destFolder
+                        destination_folder: destFolder,
+                        pages_to_keep: pagesToKeep,
+                        backup_folder: backupFolder
                     })
                 });
 
@@ -652,7 +766,9 @@
                     index: currentIndex,
                     originalPath: pdf.path,
                     newPath: result.new_path,
-                    folderNum: folderNum
+                    backupPath: result.backup_path,
+                    folderNum: folderNum,
+                    originalFolder: sourceFolder
                 });
                 updateUndoButton();
 
@@ -689,12 +805,13 @@
             updateUndoButton();
 
             try {
-                const res = await fetch('/api/move-pdf', {
+                const res = await fetch('/api/undo-move', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        source: lastMove.newPath,
-                        destination_folder: lastMove.originalPath.substring(0, lastMove.originalPath.lastIndexOf('/'))
+                        sorted_path: lastMove.newPath,
+                        backup_path: lastMove.backupPath || '',
+                        original_folder: lastMove.originalFolder || sourceFolder
                     })
                 });
 
@@ -750,8 +867,38 @@
             }
         }
 
+        let numberBuffer = '';
+        let numberTimeout = null;
+
         document.addEventListener('keydown', (e) => {
             if (e.target.tagName === 'INPUT') return;
+            
+            if (e.key >= '0' && e.key <= '9') {
+                e.preventDefault();
+                numberBuffer += e.key;
+                
+                const customInput = document.getElementById('customPages');
+                customInput.value = numberBuffer;
+                document.querySelector('input[value=custom]').checked = true;
+                
+                if (numberTimeout) clearTimeout(numberTimeout);
+                numberTimeout = setTimeout(() => {
+                    numberBuffer = '';
+                }, 800);
+                return;
+            }
+            
+            if (e.key === 'Backspace') {
+                e.preventDefault();
+                numberBuffer = numberBuffer.slice(0, -1);
+                const customInput = document.getElementById('customPages');
+                customInput.value = numberBuffer || '1';
+                if (!numberBuffer) {
+                    document.querySelector('input[value=all]').checked = true;
+                }
+                return;
+            }
+            
             if (e.key === 'ArrowLeft') {
                 e.preventDefault();
                 sortToFolder(1);
@@ -766,6 +913,10 @@
                 goToNextFile();
             } else if (e.key === 'z' || e.key === 'Z') {
                 undoLastMove();
+            } else if (e.key === 'a' || e.key === 'A') {
+                numberBuffer = '';
+                document.getElementById('customPages').value = '1';
+                document.querySelector('input[value=all]').checked = true;
             }
         });
     </script>
